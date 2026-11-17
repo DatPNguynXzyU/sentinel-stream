@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>sentinel-stream | Real-Time Fraud Monitor</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = { darkMode: 'class' };
+  </script>
+  <style>
+    @keyframes flash-in {
+      0%   { background-color: rgba(239, 68, 68, 0.45); }
+      100% { background-color: transparent; }
+    }
+    .row-new { animation: flash-in 1.6s ease-out; }
+    @keyframes pulse-ring {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.6); }
+      50%      { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+    }
+    .burst-active { animation: pulse-ring 1.2s infinite; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-200 min-h-screen">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 py-6">
+
+    <!-- Header -->
+    <header class="flex flex-wrap items-center justify-between gap-4 mb-6">
+      <div>
+        <h1 class="text-2xl font-bold tracking-tight text-white">
+          sentinel<span class="text-emerald-400">-stream</span>
+        </h1>
+        <p class="text-sm text-slate-400">Real-time transaction anomaly &amp; fraud detection pipeline</p>
+      </div>
+      <div class="flex items-center gap-4">
+        <div id="conn" class="flex items-center gap-2 text-sm text-slate-400">
+          <span id="conn-dot" class="inline-block w-2.5 h-2.5 rounded-full bg-slate-600"></span>
+          <span id="conn-text">connecting…</span>
+        </div>
+        <button id="burst-btn"
+                class="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 disabled:bg-red-900 disabled:cursor-not-allowed
+                       text-white text-sm font-semibold transition-colors">
+          Trigger Fraud Attack Burst
+        </button>
+      </div>
+    </header>
+
+    <!-- KPI cards -->
+    <section class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+      <div class="rounded-xl border border-slate-800 bg-slate-900 p-5">
+        <div class="text-xs uppercase tracking-wider text-slate-400">Total Processed</div>
+        <div id="kpi-total" class="mt-2 text-3xl font-bold text-white mono">0</div>
+        <div class="mt-1 text-xs text-slate-500"><span id="kpi-tps">0.0</span> tx/s (10s avg)</div>
+      </div>
+      <div class="rounded-xl border border-slate-800 bg-slate-900 p-5">
+        <div class="text-xs uppercase tracking-wider text-slate-400">Anomalies Caught</div>
+        <div id="kpi-flagged" class="mt-2 text-3xl font-bold text-red-400 mono">0</div>
+        <div class="mt-1 text-xs text-slate-500"><span id="kpi-rate">0.00</span>% of traffic</div>
+      </div>
+      <div class="rounded-xl border border-slate-800 bg-slate-900 p-5">
+        <div class="text-xs uppercase tracking-wider text-slate-400">p95 Latency (ms)</div>
+        <div id="kpi-p95" class="mt-2 text-3xl font-bold text-emerald-400 mono">0.000</div>
+        <div class="mt-1 text-xs text-slate-500">
+          p50 <span id="kpi-p50" class="mono">0.000</span> ·
+          p99 <span id="kpi-p99" class="mono">0.000</span>
+        </div>
+      </div>
+      <div class="rounded-xl border border-slate-800 bg-slate-900 p-5">
+        <div class="text-xs uppercase tracking-wider text-slate-400">Simulator Mode</div>
+        <div id="kpi-mode" class="mt-2 text-3xl font-bold text-sky-400">Normal</div>
+        <div id="kpi-mode-sub" class="mt-1 text-xs text-slate-500">legitimate traffic</div>
+      </div>
+    </section>
+
+    <!-- Anomaly table -->
+    <section class="rounded-xl border border-slate-800 bg-slate-900 overflow-hidden">
+      <div class="flex items-center justify-between px-5 py-4 border-b border-slate-800">
+        <h2 class="text-lg font-semibold text-white">Flagged Transactions</h2>
+        <span class="text-xs text-slate-500">latest 25 · live via Server-Sent Events</span>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="min-w-full text-sm">
+          <thead class="bg-slate-900/80 text-slate-400 text-xs uppercase tracking-wider">
+            <tr>
+              <th class="px-5 py-3 text-left">Time</th>
+              <th class="px-5 py-3 text-left">Tx ID</th>
+              <th class="px-5 py-3 text-left">User</th>
+              <th class="px-5 py-3 text-right">Amount</th>
+              <th class="px-5 py-3 text-right">Tx / 60s</th>
+              <th class="px-5 py-3 text-right">Spend / 60s</th>
+              <th class="px-5 py-3 text-right">Latency</th>
+            </tr>
+          </thead>
+          <tbody id="anomaly-body" class="divide-y divide-slate-800"></tbody>
+        </table>
+        <div id="empty-state" class="px-5 py-10 text-center text-slate-500 text-sm">
+          No anomalies yet — trigger a fraud attack burst to see the detector react.
+        </div>
+      </div>
+    </section>
+
+    <footer class="mt-6 text-center text-xs text-slate-600">
+      Redis Streams · Sorted-Set features · ONNX Runtime IsolationForest · PostgreSQL
+    </footer>
+  </div>
+
+  <script>
+    (function () {
+      'use strict';
+
+      const MAX_ROWS = 25;
+      const $ = (id) => document.getElementById(id);
+      const body = $('anomaly-body');
+      const seen = new Set();
+      const nf = new Intl.NumberFormat('en-US');
+      const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+
+      function setConn(state) {
+        const dot = $('conn-dot');
+        const text = $('conn-text');
+        dot.className = 'inline-block w-2.5 h-2.5 rounded-full ' +
+          (state === 'live' ? 'bg-emerald-400' : state === 'error' ? 'bg-red-500' : 'bg-slate-600');
+        text.textContent = state === 'live' ? 'live' : state === 'error' ? 'reconnecting…' : 'connecting…';
+      }
+
+      function latencyBadge(ms) {
+        const span = document.createElement('span');
+        let cls = 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40';
+        if (ms >= 25) cls = 'bg-red-500/15 text-red-300 border-red-500/40';
+        else if (ms >= 10) cls = 'bg-amber-500/15 text-amber-300 border-amber-500/40';
+        span.className = 'inline-block px-2 py-0.5 rounded-full border text-xs mono ' + cls;
+        span.textContent = ms.toFixed(2) + ' ms' + (ms < 10 ? ' ⚡' : '');
+        return span;
+      }
+
+      function cell(content, className) {
+        const td = document.createElement('td');
+        td.className = 'px-5 py-2.5 whitespace-nowrap ' + (className || '');
+        if (content instanceof Node) td.appendChild(content);
+        else td.textContent = content;
+        return td;
+      }
+
+      function buildRow(a, isNew) {
+        const tr = document.createElement('tr');
+        tr.dataset.txId = a.tx_id;
+        tr.className = 'hover:bg-slate-800/50' + (isNew ? ' row-new' : '');
+        const time = new Date(a.created_at);
+        tr.appendChild(cell(isNaN(time) ? '-' : time.toLocaleTimeString(), 'text-slate-400 mono'));
+        tr.appendChild(cell(String(a.tx_id).slice(0, 12), 'text-slate-300 mono'));
+        tr.appendChild(cell(String(a.user_id), 'text-slate-300'));
+        tr.appendChild(cell(money.format(a.amount), 'text-right font-semibold text-red-300 mono'));
+        tr.appendChild(cell(String(a.tx_count_60s), 'text-right mono'));
+        tr.appendChild(cell(money.format(a.total_spend_60s), 'text-right mono'));
+        const latTd = cell(latencyBadge(Number(a.latency_ms)), 'text-right');
+        tr.appendChild(latTd);
+        return tr;
+      }
+
+      function trimRows() {
+        while (body.children.length > MAX_ROWS) {
+          const last = body.lastElementChild;
+          seen.delete(last.dataset.txId);
+          body.removeChild(last);
+        }
+        $('empty-state').style.display = body.children.length ? 'none' : 'block';
+      }
+
+      function addAnomaly(a) {
+        if (!a || seen.has(a.tx_id)) return;
+        seen.add(a.tx_id);
+        body.insertBefore(buildRow(a, true), body.firstChild);
+        trimRows();
+      }
+
+      async function loadInitial() {
+        try {
+          const res = await fetch('/api/anomalies');
+          if (!res.ok) return;
+          const rows = await res.json();
+          // API returns newest first; append in that order.
+          rows.forEach((a) => {
+            if (seen.has(a.tx_id)) return;
+            seen.add(a.tx_id);
+            body.appendChild(buildRow(a, false));
+          });
+          trimRows();
+        } catch (e) { /* the periodic refresh will retry */ }
+      }
+
+      async function refreshMetrics() {
+        try {
+          const res = await fetch('/api/metrics', { cache: 'no-store' });
+          if (!res.ok) throw new Error(res.status);
+          const m = await res.json();
+          $('kpi-total').textContent = nf.format(m.total_processed);
+          $('kpi-flagged').textContent = nf.format(m.flagged_count);
+          $('kpi-p95').textContent = m.p95_latency_ms.toFixed(3);
+          $('kpi-p50').textContent = m.p50_latency_ms.toFixed(3);
+          $('kpi-p99').textContent = m.p99_latency_ms.toFixed(3);
+          $('kpi-tps').textContent = m.throughput_tps.toFixed(1);
+          $('kpi-rate').textContent = m.total_processed
+            ? ((m.flagged_count / m.total_processed) * 100).toFixed(2) : '0.00';
+
+          const mode = $('kpi-mode');
+          const btn = $('burst-btn');
+          if (m.burst_active) {
+            mode.textContent = 'FRAUD BURST';
+            mode.className = 'mt-2 text-3xl font-bold text-red-400';
+            $('kpi-mode-sub').textContent = m.burst_seconds_remaining + 's remaining';
+            btn.disabled = true;
+            btn.classList.add('burst-active');
+          } else {
+            mode.textContent = 'Normal';
+            mode.className = 'mt-2 text-3xl font-bold text-sky-400';
+            $('kpi-mode-sub').textContent = 'legitimate traffic';
+            btn.disabled = false;
+            btn.classList.remove('burst-active');
+          }
+        } catch (e) { /* transient; next tick retries */ }
+      }
+
+      $('burst-btn').addEventListener('click', async () => {
+        const btn = $('burst-btn');
+        btn.disabled = true;
+        try {
+          await fetch('/api/trigger-burst', { method: 'POST' });
+        } catch (e) {
+          btn.disabled = false;
+        }
+        refreshMetrics();
+      });
+
+      function connectStream() {
+        const es = new EventSource('/api/stream');
+        es.onopen = () => setConn('live');
+        es.onerror = () => setConn('error'); // EventSource reconnects automatically
+        es.addEventListener('anomaly', (ev) => {
+          try { addAnomaly(JSON.parse(ev.data)); } catch (e) { /* ignore malformed */ }
+        });
+      }
+
+      loadInitial();
+      refreshMetrics();
+      setInterval(refreshMetrics, 1000);
+      connectStream();
+    })();
+  </script>
+</body>
+</html>
